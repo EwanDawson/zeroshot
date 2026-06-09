@@ -14,7 +14,7 @@
  * - export: Export cluster conversation
  */
 
-const { Command } = require('commander');
+const { program } = require('commander');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -49,7 +49,6 @@ const {
 const { normalizeProviderName } = require('../lib/provider-names');
 const { getProvider, parseProviderChunk } = require('../src/providers');
 const { MOUNT_PRESETS, resolveEnvs } = require('../lib/docker-config');
-const { launchTuiSession } = require('../lib/tui-launcher');
 const {
   detectGitRepoRoot,
   detectRunInput,
@@ -62,11 +61,14 @@ const {
 } = require('../lib/start-cluster');
 const { requirePreflight } = require('../src/preflight');
 const { providersCommand, setDefaultCommand, setupCommand } = require('./commands/providers');
+const { runInspectCommand } = require('./commands/inspect');
+const {
+  markDetachedSetupFailed,
+  registerDetachedSetupCluster,
+} = require('../lib/detached-startup');
 // Setup wizard removed - use: zeroshot settings set <key> <value>
 const { checkForUpdates } = require('./lib/update-checker');
 const { StatusFooter, AGENT_STATE, ACTIVE_STATES } = require('../src/status-footer');
-
-const program = new Command();
 
 // =============================================================================
 // GLOBAL ERROR HANDLERS - Prevent silent process death
@@ -217,11 +219,14 @@ function shouldRunDetached(options) {
   return options.detach && !process.env.ZEROSHOT_DAEMON;
 }
 
-function printDetachedClusterStart(options, clusterId) {
+function printDetachedClusterStart(options, clusterId, logPath) {
   if (options.docker) {
     console.log(`Started ${clusterId} (docker)`);
   } else {
     console.log(`Started ${clusterId}`);
+  }
+  if (logPath) {
+    console.log(`Setup log: ${logPath}`);
   }
   console.log(`Monitor: zeroshot logs ${clusterId} -f`);
   console.log(`Attach:  zeroshot attach ${clusterId}`);
@@ -272,19 +277,28 @@ function buildDaemonEnv(options, clusterId, targetCwd) {
   };
 }
 
-function spawnDetachedCluster(options, clusterId) {
+async function spawnDetachedCluster(options, clusterId) {
   const { spawn } = require('child_process');
-  printDetachedClusterStart(options, clusterId);
   const logFd = createDaemonLogFile(clusterId);
   const targetCwd = detectGitRepoRoot();
+  const logPath = path.join(os.homedir(), '.zeroshot', `${clusterId}-daemon.log`);
   const daemon = spawn(process.execPath, process.argv.slice(1), {
     detached: true,
     stdio: ['ignore', logFd, logFd],
     cwd: targetCwd,
     env: buildDaemonEnv(options, clusterId, targetCwd),
   });
+  await registerDetachedSetupCluster({
+    clusterId,
+    pid: daemon.pid,
+    storageDir: path.join(os.homedir(), '.zeroshot'),
+    logPath,
+    runOptions: options,
+    cwd: targetCwd,
+  });
   daemon.unref();
   fs.closeSync(logFd);
+  printDetachedClusterStart(options, clusterId, logPath);
 }
 
 function resolveClusterId(generateName) {
@@ -345,14 +359,11 @@ function applyModelOverrideToConfig(config, modelOverride, providerOverride, set
     providerOverride || config.defaultProvider || settings.defaultProvider || 'claude'
   );
   const provider = getProvider(providerName);
-  const catalog = provider.getModelCatalog();
-
-  if (catalog && !catalog[modelOverride]) {
-    console.warn(
-      chalk.yellow(
-        `Warning: model override "${modelOverride}" is not in the ${providerName} catalog`
-      )
-    );
+  try {
+    provider.validateModelId(modelOverride);
+  } catch (err) {
+    console.error(chalk.red(`Error: ${err.message}`));
+    process.exit(1);
   }
 
   if (providerName === 'claude') {
@@ -645,6 +656,13 @@ function enrichClustersWithTokens(clusters, orchestrator) {
   });
 }
 
+function filterClustersByStatus(clusters, status) {
+  if (!status) {
+    return clusters;
+  }
+  return clusters.filter((cluster) => cluster.state === status);
+}
+
 function formatClusterRow(cluster) {
   const created = new Date(cluster.createdAt).toLocaleString();
   const tokenDisplay = cluster.totalTokens > 0 ? cluster.totalTokens.toLocaleString() : '-';
@@ -757,6 +775,15 @@ function printClusterStatusHeader(status, clusterId) {
   }
   if (status.pid) {
     console.log(`PID: ${status.pid}`);
+  }
+  if (status.setupStage) {
+    console.log(`Setup: ${status.setupStage}`);
+  }
+  if (status.setupLogPath) {
+    console.log(`Setup log: ${status.setupLogPath}`);
+  }
+  if (status.failureInfo?.error) {
+    console.log(`Failure: ${status.failureInfo.error}`);
   }
   console.log(`Created: ${new Date(status.createdAt).toLocaleString()}`);
   console.log(`Messages: ${status.messageCount}`);
@@ -1148,10 +1175,43 @@ function getClusterActiveState(quietOrchestrator, id) {
 }
 
 function getClusterMessages(cluster, id) {
+  if (cluster.provisional || cluster.state === 'setup') {
+    return { dbMessages: [], allMessages: [] };
+  }
   const dbMessages = cluster.messageBus.getAll(id);
   const taskLogMessages = readAgentTaskLogs(cluster);
   const allMessages = [...dbMessages, ...taskLogMessages].sort((a, b) => a.timestamp - b.timestamp);
   return { dbMessages, allMessages };
+}
+
+function readSetupLogLines(logPath, limit) {
+  if (!logPath || !fs.existsSync(logPath)) {
+    return [];
+  }
+  const content = fs.readFileSync(logPath, 'utf8');
+  const lines = content.split('\n').filter((line) => line.length > 0);
+  return lines.slice(-limit);
+}
+
+function printSetupLogLines(logPath, limit) {
+  const lines = readSetupLogLines(logPath, limit);
+  for (const line of lines) {
+    console.log(line);
+  }
+}
+
+function followSetupLog(logPath) {
+  if (!logPath) {
+    console.log(chalk.dim('No setup log path recorded yet.'));
+    return;
+  }
+  console.log(chalk.dim(`\n--- Following setup log ${logPath} (Ctrl+C to stop) ---\n`));
+  const proc = require('child_process').spawn('tail', ['-f', logPath], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  keepProcessAlive(() => {
+    proc.kill('SIGTERM');
+  });
 }
 
 function printRecentMessages(messages, limit, isActive, options) {
@@ -1318,6 +1378,13 @@ function followClusterLogs(cluster, id, dbMessages, isActive, options) {
 
 function showClusterLogsById(quietOrchestrator, id, options, limit) {
   const cluster = getClusterOrExit(quietOrchestrator, id);
+  if (cluster.provisional || cluster.state === 'setup') {
+    printSetupLogLines(cluster.setupLogPath, limit);
+    if (options.follow) {
+      followSetupLog(cluster.setupLogPath);
+    }
+    return;
+  }
   const isActive = getClusterActiveState(quietOrchestrator, id);
   const { dbMessages, allMessages } = getClusterMessages(cluster, id);
   printRecentMessages(allMessages, limit, isActive, options);
@@ -1807,7 +1874,8 @@ function printFinishTaskStarted(cluster) {
 async function getPurgeData(orchestrator) {
   const clusters = orchestrator.listClusters();
   const runningClusters = clusters.filter(
-    (cluster) => cluster.state === 'running' || cluster.state === 'initializing'
+    (cluster) =>
+      cluster.state === 'running' || cluster.state === 'initializing' || cluster.state === 'setup'
   );
   const { loadTasks } = await import('../task-lib/store.js');
   const { isProcessRunning } = await import('../task-lib/runner.js');
@@ -2219,16 +2287,12 @@ Examples:
   ${chalk.cyan('zeroshot run "Implement feature X"')}  Run cluster from plain text
   ${chalk.cyan('zeroshot run 123 -d')}                 Run in background (detached)
   ${chalk.cyan('zeroshot run 123 --docker')}           Run in Docker container (safe for e2e tests)
-  ${chalk.cyan('zeroshot')}                            Open TUI (TTY only)
-  ${chalk.cyan('zeroshot tui')}                        Open TUI explicitly
-  ${chalk.cyan('zeroshot watch')}                      Open TUI Monitor view
   ${chalk.cyan('zeroshot task run "Fix the bug"')}     Run single-agent background task
   ${chalk.cyan('zeroshot list')}                       List all tasks and clusters
   ${chalk.cyan('zeroshot task list')}                  List tasks only
-  ${chalk.cyan('zeroshot task watch')}                 Interactive TUI - navigate tasks, view logs
   ${chalk.cyan('zeroshot attach <id>')}                Attach to running task (Ctrl+B d to detach)
   ${chalk.cyan('zeroshot logs -f')}                    Stream logs in real-time (like tail -f)
-  ${chalk.cyan('zeroshot logs -w')}                    Interactive watch mode (for tasks)
+  ${chalk.cyan('zeroshot logs -w')}                    Watch cluster lifecycle and event summaries
   ${chalk.cyan('zeroshot logs <id> -f')}               Stream logs for specific cluster/task
   ${chalk.cyan('zeroshot status <id>')}                Detailed status of task or cluster
   ${chalk.cyan('zeroshot finish <id>')}                Convert cluster to completion task (creates and merges PR)
@@ -2381,7 +2445,7 @@ Force provider flags: -G (GitHub), -L (GitLab), -J (Jira), -D (DevOps)
 
       if (shouldRunDetached(options)) {
         const clusterId = generateName('cluster');
-        spawnDetachedCluster(options, clusterId);
+        await spawnDetachedCluster(options, clusterId);
         return;
       }
 
@@ -2440,7 +2504,9 @@ Force provider flags: -G (GitHub), -L (GitLab), -J (Jira), -D (DevOps)
           options,
         });
       } else {
-        throw new Error('Invalid run input: expected text, issue, or file');
+        throw new Error(
+          `Invalid run input for cluster ${clusterId}: expected text, issue, or file`
+        );
       }
 
       if (!process.env.ZEROSHOT_DAEMON) {
@@ -2449,6 +2515,22 @@ Force provider flags: -G (GitHub), -L (GitLab), -J (Jira), -D (DevOps)
 
       setupDaemonCleanup(orchestrator, clusterId);
     } catch (error) {
+      if (process.env.ZEROSHOT_DAEMON && process.env.ZEROSHOT_CLUSTER_ID) {
+        try {
+          await markDetachedSetupFailed({
+            clusterId: process.env.ZEROSHOT_CLUSTER_ID,
+            storageDir: path.join(os.homedir(), '.zeroshot'),
+            error,
+            logPath: path.join(
+              os.homedir(),
+              '.zeroshot',
+              `${process.env.ZEROSHOT_CLUSTER_ID}-daemon.log`
+            ),
+          });
+        } catch (markError) {
+          console.error('Failed to mark detached setup failure:', markError.message);
+        }
+      }
       console.error('Error:', error.message);
       process.exit(1);
     }
@@ -2517,24 +2599,6 @@ taskCmd
     }
   });
 
-taskCmd
-  .command('watch')
-  .description('Interactive TUI for tasks (navigate and view logs)')
-  .option('--refresh-rate <ms>', 'Refresh interval in milliseconds', '1000')
-  .action(async (options) => {
-    try {
-      const TaskTUI = (await import('../task-lib/tui.js')).default;
-      const tui = new TaskTUI({
-        refreshRate: parseInt(options.refreshRate, 10),
-      });
-      await tui.start();
-    } catch (error) {
-      console.error('Error starting task TUI:', error.message);
-      console.error(error.stack);
-      process.exit(1);
-    }
-  });
-
 // List command - unified (shows both tasks and clusters)
 program
   .command('list')
@@ -2546,7 +2610,7 @@ program
   .action(async (options) => {
     try {
       const orchestrator = await getOrchestrator();
-      const clusters = orchestrator.listClusters();
+      const clusters = filterClustersByStatus(orchestrator.listClusters(), options.status);
       const enrichedClusters = enrichClustersWithTokens(clusters, orchestrator);
 
       const { listTasks, getTasksData } = await import('../task-lib/commands/list.js');
@@ -2605,6 +2669,24 @@ program
     }
   });
 
+program
+  .command('inspect <id>')
+  .description('Inspect live process activity for a task or cluster')
+  .option('--json', 'Output as JSON')
+  .option('--sample-ms <ms>', 'Sampling period for process activity checks', '1000')
+  .action(async (id, options) => {
+    try {
+      await runInspectCommand(id, options);
+    } catch (error) {
+      if (options.json) {
+        console.log(JSON.stringify({ error: error.message }, null, 2));
+      } else {
+        console.error('Error inspecting:', error.message);
+      }
+      process.exit(1);
+    }
+  });
+
 // Logs command - smart (works for both tasks and clusters)
 program
   .command('logs [id]')
@@ -2612,7 +2694,7 @@ program
   .option('-f, --follow', 'Follow logs in real-time (stream output like tail -f)')
   .option('-n, --limit <number>', 'Number of recent messages to show (default: 50)', '50')
   .option('--lines <number>', 'Number of lines to show (task mode)', parseInt)
-  .option('-w, --watch', 'Watch mode: interactive TUI for tasks, high-level events for clusters')
+  .option('-w, --watch', 'Watch mode: high-level events for clusters')
   .action(async (id, options) => {
     try {
       if (id) {
@@ -2744,7 +2826,7 @@ program
       const orchestrator = await getOrchestrator();
       const clusters = orchestrator.listClusters();
       const runningClusters = clusters.filter(
-        (c) => c.state === 'running' || c.state === 'initializing'
+        (c) => c.state === 'running' || c.state === 'initializing' || c.state === 'setup'
       );
 
       const { loadTasks } = await import('../task-lib/store.js');
@@ -3139,8 +3221,7 @@ program
   .option('-y, --yes', 'Skip confirmation if cluster is running')
   .action(async (id, options) => {
     try {
-      const OrchestratorModule = require('../src/orchestrator');
-      const orchestrator = new OrchestratorModule();
+      const orchestrator = await getOrchestrator();
 
       const cluster = getFinishCluster(orchestrator, id);
       await stopClusterIfRunning(cluster, id, options, orchestrator);
@@ -3184,6 +3265,53 @@ program
       await cleanTasks(options);
     } catch (error) {
       console.error('Error cleaning tasks:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Garbage-collect orphaned worktrees and database files
+function printGcResult(result, dryRun) {
+  const verb = dryRun ? 'Would remove' : 'Removed';
+  if (result.orphanedWorktrees.length === 0 && result.orphanedDbs.length === 0) {
+    console.log(chalk.dim('No orphaned worktrees or database files found.'));
+    return;
+  }
+  if (result.orphanedWorktrees.length > 0) {
+    console.log(chalk.bold(`\n${verb} ${result.orphanedWorktrees.length} orphaned worktree(s):`));
+    result.orphanedWorktrees.forEach((n) =>
+      console.log(chalk.dim(`  ~/.zeroshot/worktrees/${n}/`))
+    );
+  }
+  if (result.orphanedDbs.length > 0) {
+    console.log(chalk.bold(`\n${verb} ${result.orphanedDbs.length} orphaned database file(s):`));
+    result.orphanedDbs.forEach((n) => console.log(chalk.dim(`  ~/.zeroshot/${n}`)));
+  }
+  if (result.errors.length > 0) {
+    console.log(chalk.yellow(`\n${result.errors.length} error(s):`));
+    result.errors.forEach((e) => console.log(chalk.yellow(`  ${e}`)));
+  }
+  if (!dryRun) console.log(chalk.green('\n✓ Garbage collection complete.'));
+}
+
+async function runGc(dryRun) {
+  try {
+    const orchestrator = await getOrchestrator();
+    return orchestrator.gcWorktrees({ dryRun });
+  } catch {
+    const { gcOrphanedWorktrees } = await import('../src/lib/gc.js');
+    return gcOrphanedWorktrees({ dryRun });
+  }
+}
+
+program
+  .command('gc')
+  .description('Clean up orphaned worktree directories and stale database files')
+  .option('--dry-run', 'Show what would be removed without deleting')
+  .action(async (options) => {
+    try {
+      printGcResult(await runGc(options.dryRun), options.dryRun);
+    } catch (error) {
+      console.error('Error during garbage collection:', error.message);
       process.exit(1);
     }
   });
@@ -3297,54 +3425,29 @@ program
     }
   });
 
-// Watch command - TUI Monitor view
-program
-  .command('watch')
-  .description('Open TUI in Monitor view')
-  .option('--refresh-rate <ms>', 'Refresh interval in milliseconds', '1000')
-  .action((_options) => {
-    try {
-      launchTuiSession({ initialView: 'monitor' });
-    } catch (error) {
-      console.error('Error starting TUI:', error.message);
-      process.exit(1);
-    }
-  });
+function failTuiUnavailable() {
+  console.error(
+    'The TUI is not included in this Zeroshot release. Use `zeroshot logs -f`, `zeroshot logs -w`, or `zeroshot list` instead.'
+  );
+  process.exit(1);
+}
 
-// TUI command - TUI session
+program.command('watch').description('TUI unavailable in this release').action(failTuiUnavailable);
+
 program
   .command('tui')
-  .description('Open TUI')
-  .option(
-    '--provider <provider>',
-    'Override provider for this TUI session (claude, codex, gemini, opencode)'
-  )
-  .option('--ui <variant>', 'Select UI variant (classic, disruptive)')
+  .description('TUI unavailable in this release')
   .allowExcessArguments(true)
   .allowUnknownOption(true)
-  .action((options) => {
-    try {
-      launchTuiSession(options);
-    } catch (error) {
-      console.error('Error starting TUI:', error.message);
-      process.exit(1);
-    }
-  });
+  .action(failTuiUnavailable);
 
 function registerTuiEntrypoint(commandName, providerName) {
   program
     .command(commandName)
-    .description(`Interactive TUI to monitor clusters (provider: ${providerName})`)
+    .description(`TUI unavailable in this release (provider: ${providerName})`)
     .allowExcessArguments(true)
     .allowUnknownOption(true)
-    .action(() => {
-      try {
-        launchTuiSession({ provider: providerName });
-      } catch (error) {
-        console.error('Error starting TUI:', error.message);
-        process.exit(1);
-      }
-    });
+    .action(failTuiUnavailable);
 }
 
 registerTuiEntrypoint('codex', 'codex');
@@ -5284,13 +5387,8 @@ async function main() {
   let args = process.argv.slice(2);
 
   if (args.length === 0) {
-    const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-    if (isInteractiveTty) {
-      process.argv.splice(2, 0, 'tui');
-    } else {
-      program.outputHelp();
-      return;
-    }
+    program.outputHelp();
+    return;
   }
 
   // Default command handling: if first arg doesn't match a known command, treat it as 'run'
