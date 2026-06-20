@@ -24,6 +24,7 @@ export {
 } from './claude-recovery';
 import { codexAdapter } from './codex';
 import { geminiAdapter } from './gemini';
+import { kiroAdapter } from './kiro';
 import { opencodeAdapter } from './opencode';
 
 const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
@@ -31,9 +32,10 @@ const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
   codex: codexAdapter,
   gemini: geminiAdapter,
   opencode: opencodeAdapter,
+  kiro: kiroAdapter,
 };
 
-const PROVIDER_IDS: readonly ProviderId[] = ['claude', 'codex', 'gemini', 'opencode'];
+const PROVIDER_IDS: readonly ProviderId[] = ['claude', 'codex', 'gemini', 'opencode', 'kiro'];
 
 function isOutputEventArray(
   event: OutputEvent | readonly OutputEvent[]
@@ -55,6 +57,8 @@ function normalizeProviderName(name: string): ProviderId | string {
       return 'gemini';
     case 'opencode':
       return 'opencode';
+    case 'kiro':
+      return 'kiro';
     default:
       return name;
   }
@@ -65,7 +69,13 @@ function adapterForProviderId(provider: ProviderId): ProviderAdapter {
 }
 
 function isProviderId(name: string): name is ProviderId {
-  return name === 'claude' || name === 'codex' || name === 'gemini' || name === 'opencode';
+  return (
+    name === 'claude' ||
+    name === 'codex' ||
+    name === 'gemini' ||
+    name === 'opencode' ||
+    name === 'kiro'
+  );
 }
 
 export function getProviderAdapter(name: KnownProviderName | string): ProviderAdapter {

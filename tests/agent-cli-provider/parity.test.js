@@ -120,6 +120,21 @@ test('runtime Opencode command facade delegates to helper', () => {
   });
 });
 
+test('runtime Kiro command facade delegates to helper', () => {
+  assertRuntimeCommandParity('kiro', 'kiro context', {
+    outputFormat: 'json',
+    jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    cwd: '/tmp/project',
+    autoApprove: true,
+    cliFeatures: {
+      supportsJson: true,
+      supportsNoInteractive: true,
+      supportsTrustAllTools: true,
+      supportsCwd: true,
+    },
+  });
+});
+
 test('Codex helper exposes strict schema cleanup metadata through runtime facade', () => {
   const actual = runtimeProviders.getProvider('codex').buildCommand('schema context', {
     outputFormat: 'json',
@@ -195,6 +210,7 @@ test('parser output from runtime facade matches helper fixtures', () => {
   for (const [provider, files] of [
     ['codex', ['text.jsonl', 'tool.jsonl']],
     ['gemini', ['text.jsonl', 'tool.jsonl']],
+    ['kiro', ['text.jsonl', 'tool.jsonl']],
   ]) {
     for (const file of files) {
       const chunk = fixture(provider, file);

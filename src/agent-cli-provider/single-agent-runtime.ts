@@ -174,6 +174,7 @@ function runtimeHelpCommand(provider: ProviderId): CommandParts {
   if (provider === 'claude') return getClaudeRuntimeCommand();
   if (provider === 'codex') return { command: 'codex', args: ['exec'] };
   if (provider === 'opencode') return { command: 'opencode', args: ['run'] };
+  if (provider === 'kiro') return { command: 'kiro-cli', args: ['chat'] };
   return { command: 'gemini', args: [] };
 }
 

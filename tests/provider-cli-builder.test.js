@@ -228,6 +228,98 @@ describe('Opencode provider helper builder', function () {
   });
 });
 
+describe('Kiro provider helper builder', function () {
+  it('builds a headless chat command with the prompt as the last arg', function () {
+    const result = buildCommand('kiro', 'test prompt', {
+      cliFeatures: { supportsNoInteractive: true },
+    });
+
+    assert.strictEqual(result.binary, 'kiro-cli');
+    assert.deepStrictEqual(result.args.slice(0, 2), ['chat', '--no-interactive']);
+    assert.strictEqual(result.args[result.args.length - 1], 'test prompt');
+  });
+
+  it('includes --output-format json when supported', function () {
+    const result = buildCommand('kiro', 'test', {
+      outputFormat: 'json',
+      cliFeatures: { supportsJson: true, supportsNoInteractive: true },
+    });
+
+    assert.ok(result.args.includes('--output-format'));
+    assert.ok(result.args.includes('json'));
+  });
+
+  it('omits --output-format when CLI does not support it', function () {
+    const result = buildCommand('kiro', 'test', {
+      outputFormat: 'json',
+      cliFeatures: { supportsJson: false, supportsNoInteractive: true },
+    });
+
+    assert.ok(!result.args.includes('--output-format'));
+  });
+
+  it('includes --trust-all-tools when autoApprove and supported', function () {
+    const result = buildCommand('kiro', 'test', {
+      autoApprove: true,
+      cliFeatures: { supportsTrustAllTools: true, supportsNoInteractive: true },
+    });
+
+    assert.ok(result.args.includes('--trust-all-tools'));
+  });
+
+  it('warns and omits --trust-all-tools when autoApprove is unsupported', function () {
+    const result = buildCommand('kiro', 'test', {
+      autoApprove: true,
+      cliFeatures: { supportsTrustAllTools: false, supportsNoInteractive: true },
+    });
+
+    assert.ok(!result.args.includes('--trust-all-tools'));
+    assert.ok(result.warnings.some((warning) => warning.code === 'kiro-auto-approve'));
+  });
+
+  it('always injects schema into context with no schema flag', function () {
+    const schema = { type: 'object', properties: { result: { type: 'string' } } };
+    const result = buildCommand('kiro', 'test prompt', {
+      jsonSchema: schema,
+      cliFeatures: { supportsJson: true, supportsNoInteractive: true },
+    });
+
+    const finalContext = result.args[result.args.length - 1];
+    assert.ok(finalContext.includes('## OUTPUT FORMAT (CRITICAL - REQUIRED)'));
+    assert.ok(finalContext.includes('"result"'));
+  });
+
+  it('warns when unsupported session control options are ignored', function () {
+    const resumed = buildCommand('kiro', 'test context', {
+      resumeSessionId: 'session-123',
+      cliFeatures: { supportsNoInteractive: true },
+    });
+    assert.ok(!resumed.args.includes('--resume'));
+    assert.ok(resumed.warnings.some((warning) => warning.code === 'unsupported-session-control'));
+  });
+
+  it('omits --model and warns when a model is requested but unsupported', function () {
+    const result = buildCommand('kiro', 'test', {
+      modelSpec: { model: 'claude-opus-4-1' },
+      cliFeatures: { supportsModel: false, supportsNoInteractive: true },
+    });
+
+    assert.ok(!result.args.includes('--model'));
+    assert.ok(result.warnings.some((warning) => warning.code === 'kiro-model'));
+  });
+
+  it('emits --model when the installed CLI advertises the flag', function () {
+    const result = buildCommand('kiro', 'test', {
+      modelSpec: { model: 'claude-opus-4-1' },
+      cliFeatures: { supportsModel: true, supportsNoInteractive: true },
+    });
+
+    const modelFlagIndex = result.args.indexOf('--model');
+    assert.ok(modelFlagIndex >= 0);
+    assert.strictEqual(result.args[modelFlagIndex + 1], 'claude-opus-4-1');
+  });
+});
+
 describe('Claude provider helper builder', function () {
   const originalEnv = process.env.ZEROSHOT_CLAUDE_COMMAND;
 

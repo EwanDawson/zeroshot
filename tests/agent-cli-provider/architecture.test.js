@@ -26,6 +26,7 @@ const providerPolicyNames = [
   'codex',
   'gemini',
   'opencode',
+  'kiro',
   'anthropic',
   'openai',
   'google',

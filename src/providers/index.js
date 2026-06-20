@@ -46,6 +46,16 @@ const PROVIDER_METADATA = {
     credentialPaths: ['~/.local/share/opencode'],
     settingsFields: [],
   },
+  kiro: {
+    displayName: 'Kiro',
+    cliCommand: 'kiro-cli',
+    helpArgs: () => ['chat'],
+    commandParts: () => ({ command: 'kiro-cli', args: [] }),
+    installInstructions: 'See https://kiro.dev for kiro-cli installation instructions.',
+    authInstructions: 'Set KIRO_API_KEY in your environment.',
+    credentialPaths: ['~/.config/kiro', '~/.kiro'],
+    settingsFields: [],
+  },
 };
 
 const warned = new Set();

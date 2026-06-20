@@ -1,4 +1,4 @@
-export type ProviderId = 'claude' | 'codex' | 'gemini' | 'opencode';
+export type ProviderId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'kiro';
 export type ProviderAlias = 'anthropic' | 'openai' | 'google';
 export type KnownProviderName = ProviderId | ProviderAlias;
 export type ModelLevel = 'level1' | 'level2' | 'level3';
@@ -80,11 +80,21 @@ export interface OpencodeCliFeatures extends BaseCliFeatures {
   readonly supportsAutoApprove: false;
 }
 
+export interface KiroCliFeatures extends BaseCliFeatures {
+  readonly provider: 'kiro';
+  readonly supportsJson: boolean;
+  readonly supportsNoInteractive: boolean;
+  readonly supportsTrustAllTools: boolean;
+  readonly supportsModel: boolean;
+  readonly supportsCwd: boolean;
+}
+
 export type ProviderCliFeatures =
   | ClaudeCliFeatures
   | CodexCliFeatures
   | GeminiCliFeatures
-  | OpencodeCliFeatures;
+  | OpencodeCliFeatures
+  | KiroCliFeatures;
 
 export interface CliFeatureOverrides {
   readonly supportsOutputFormat?: boolean;
@@ -100,6 +110,8 @@ export interface CliFeatureOverrides {
   readonly supportsConfigOverride?: boolean;
   readonly supportsSkipGitRepoCheck?: boolean;
   readonly supportsVariant?: boolean;
+  readonly supportsTrustAllTools?: boolean;
+  readonly supportsNoInteractive?: boolean;
   readonly unknown?: boolean;
 }
 
