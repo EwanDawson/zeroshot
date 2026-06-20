@@ -11,6 +11,7 @@ authentication. Use each CLI's login flow or API key setup.
 | Codex    | Codex       | `npm install -g @openai/codex`             |
 | Gemini   | Gemini      | `npm install -g @google/gemini-cli`        |
 | Opencode | Opencode    | See https://opencode.ai                    |
+| Kiro     | Kiro CLI    | See https://kiro.dev                        |
 
 ## Selecting a Provider
 
@@ -50,6 +51,11 @@ Notes:
 
 - `reasoningEffort` applies to Codex and Opencode only.
 - `model` is still supported as a provider-specific escape hatch.
+- Kiro (headless `kiro-cli chat --no-interactive`) has no per-invocation model
+  flag, so levels defer to its globally configured model
+  (`kiro-cli settings chat.defaultModel`). An explicit `model` is passed via
+  `--model` only if the installed CLI advertises the flag; otherwise it is
+  ignored with a warning. Authenticate by setting `KIRO_API_KEY`.
 
 ## Docker Isolation and Credentials
 

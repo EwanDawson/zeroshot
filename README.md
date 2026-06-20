@@ -1,6 +1,6 @@
 # zeroshot CLI
 
-> **🎉 New in v5.4:** Now supports **OpenCode** CLI! Use Claude, Codex, Gemini, or OpenCode as your AI provider. Also supports **GitHub, GitLab, Jira, and Azure DevOps** as issue backends. See [Providers](#providers) and [Multi-Platform Issue Support](#multi-platform-issue-support).
+> **🎉 New:** Now supports **Kiro** CLI! Use Claude, Codex, Gemini, OpenCode, or Kiro as your AI provider. Also supports **GitHub, GitLab, Jira, and Azure DevOps** as issue backends. See [Providers](#providers) and [Multi-Platform Issue Support](#multi-platform-issue-support).
 
 <!-- install-placeholder -->
 <p align="center">
@@ -85,7 +85,7 @@ and surface conflicts with details. Handle the ABA problem where version goes A-
 npm install -g @the-open-engine/zeroshot
 ```
 
-**Requires**: Node 18+, at least one provider CLI (Claude Code, Codex, Gemini, Opencode).
+**Requires**: Node 18+, at least one provider CLI (Claude Code, Codex, Gemini, Opencode, Kiro).
 
 ```bash
 # Install one or more providers
@@ -93,12 +93,14 @@ npm i -g @anthropic-ai/claude-code
 npm i -g @openai/codex
 npm i -g @google/gemini-cli
 # Opencode: see https://opencode.ai
+# Kiro: see https://kiro.dev
 
 # Authenticate with the provider CLI
 claude login        # Claude
 codex login         # Codex
 gemini auth login   # Gemini
 opencode auth login # Opencode
+# Kiro: set KIRO_API_KEY in your environment
 
 # GitHub auth (for issue numbers)
 gh auth login

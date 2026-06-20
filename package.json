@@ -1,7 +1,7 @@
 {
   "name": "@the-open-engine/zeroshot",
   "version": "5.4.0",
-  "description": "Multi-agent orchestration engine for Claude, Codex, and Gemini",
+  "description": "Multi-agent orchestration engine for Claude, Codex, Gemini, Opencode, and Kiro",
   "main": "src/orchestrator.js",
   "bin": {
     "zeroshot": "./cli/index.js",
@@ -69,6 +69,8 @@
     "claude",
     "codex",
     "gemini",
+    "opencode",
+    "kiro",
     "automation"
   ],
   "author": "Covibes",
