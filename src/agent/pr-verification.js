@@ -652,28 +652,20 @@ function findExistingPrForBranch(branch, cwd) {
 function commitAndPushWorktree(agent, branch, cwd) {
   runGit(['add', '-A'], cwd);
   const hasStaged = runGit(['diff', '--cached', '--quiet'], cwd).status === 1;
-  const aheadCount = runGit(['rev-list', '--count', '@{upstream}..HEAD'], cwd).stdout;
-  console.error(
-    `[zeroshot:pr-recovery] commitAndPush branch=${branch} cwd=${cwd} hasStaged=${hasStaged} ahead=${aheadCount}`
-  );
   if (hasStaged) {
     const { title } = getIssueContext(agent);
     const subject = title ? `feat: ${title}` : 'feat: automated implementation';
     const commit = runGit(['commit', '-m', subject], cwd);
-    console.error(
-      `[zeroshot:pr-recovery] commit status=${commit.status} stderr=${commit.stderr.slice(0, 200)}`
-    );
     if (commit.status !== 0) {
       // Do not push an unchanged branch — that would open a PR with none of the work.
+      agent._log(`Deterministic PR fallback: git commit failed: ${commit.stderr.slice(0, 200)}`);
       return false;
     }
   }
 
   const push = runGit(['push', '-u', 'origin', branch], cwd);
-  console.error(
-    `[zeroshot:pr-recovery] push status=${push.status} stderr=${push.stderr.slice(0, 200)}`
-  );
   if (push.status !== 0) {
+    agent._log(`Deterministic PR fallback: git push failed: ${push.stderr.slice(0, 200)}`);
     return false;
   }
   return true;
@@ -698,13 +690,11 @@ function openGithubPrForBranch(agent, adapter, branch, base, cwd) {
 
   const create = spawnSync('gh', args, { cwd, encoding: 'utf8' });
   const combined = `${create.stdout || ''}\n${create.stderr || ''}`;
-  console.error(
-    `[zeroshot:pr-recovery] gh pr create base=${base || '(default)'} status=${create.status} out=${combined.trim().slice(0, 300)}`
-  );
   if (create.status !== 0) {
     // A racing create may already have opened the PR; prefer that over failing.
     const afterFailure = findExistingPrForBranch(branch, cwd);
     if (afterFailure) return afterFailure;
+    agent._log(`Deterministic PR fallback: gh pr create failed: ${combined.trim().slice(0, 300)}`);
     return null;
   }
 
@@ -730,20 +720,15 @@ function createPullRequestDeterministically({ agent, adapter, platform }) {
 
   const head = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   const branch = getSafeBranchName(head.stdout);
-  const base = resolvePrBaseBranch(cwd);
-  console.error(
-    `[zeroshot:pr-recovery] createPR cwd=${cwd} worktree=${agent?.worktree?.path || 'none'} ` +
-      `branch=${branch} base=${base}`
-  );
   if (head.status !== 0 || !branch || branch === 'HEAD') {
+    agent._log('Deterministic PR fallback: could not resolve a named branch; skipping.');
     return null;
   }
 
   // Never commit/push onto the base branch — that is not a pull request and is destructive.
+  const base = resolvePrBaseBranch(cwd);
   if (base && branch === base) {
-    console.error(
-      `[zeroshot:pr-recovery] refusing to operate on base branch "${base}"; skipping recovery.`
-    );
+    agent._log(`Deterministic PR fallback: refusing to operate on base branch "${base}".`);
     return null;
   }
 
@@ -797,10 +782,6 @@ async function verifyPullRequest({ result, agent }) {
   const providerName =
     typeof agent?._resolveProvider === 'function' ? agent._resolveProvider() : 'claude';
   const claims = resolvePrClaimsFromOutput({ output: result.output, providerName, adapter });
-  console.error(
-    `[zeroshot:pr-recovery] verifyPullRequest entered: platform=${platform} ` +
-      `claimedNumber=${claims.claimedPrNumber ?? 'none'} claimedUrl=${claims.claimedPrUrl ?? 'none'}`
-  );
 
   if (handleBlockedPusherOutcome({ claims, platform, agent })) {
     return;
@@ -839,10 +820,6 @@ async function verifyPullRequest({ result, agent }) {
   } catch (err) {
     // The agent claimed a PR/MR that does not actually exist (hallucinated).
     // Recover by creating the real PR deterministically.
-    console.error(
-      `[zeroshot:pr-recovery] fetch failed: isMissingPrError=${isMissingPrError(err)} ` +
-        `msg=${String(err && err.message).slice(0, 100)}`
-    );
     if (isMissingPrError(err) && (await recoverWithDeterministicPr({ agent, adapter, platform }))) {
       return;
     }
@@ -856,6 +833,18 @@ async function verifyPullRequest({ result, agent }) {
       `⚠️  PR metadata recovered from raw output fallback ` +
         `(provider=${providerName}, platform=${platform}, ${adapter.itemName.toLowerCase()}=#${prData.number})`
     );
+  }
+
+  // Auto-merge OFF (review mode): an existing open PR is the intended end state, not a failure.
+  if (process.env.ZEROSHOT_AUTO_MERGE !== '1' && !adapter.isMerged(prData)) {
+    agent._log(
+      `✅ VERIFICATION PASSED: ${adapter.itemName} #${prData.number} created (review mode; left open)`
+    );
+    publishClusterComplete(
+      agent,
+      buildVerificationPayload({ platform, prData, reason: 'git-pusher-complete-verified' })
+    );
+    return;
   }
 
   if (!adapter.isMerged(prData)) {

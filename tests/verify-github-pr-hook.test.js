@@ -45,6 +45,7 @@ describe('verify_pull_request hook action', () => {
   let previousPollIntervalMs;
   let previousFetchRetryAttempts;
   let previousFetchRetryIntervalMs;
+  let previousAutoMerge;
 
   beforeEach(() => {
     previousPollAttempts = process.env.ZEROSHOT_PR_MERGE_POLL_ATTEMPTS;
@@ -55,6 +56,9 @@ describe('verify_pull_request hook action', () => {
     process.env.ZEROSHOT_PR_MERGE_POLL_INTERVAL_MS = '1';
     process.env.ZEROSHOT_PR_VERIFY_FETCH_RETRY_ATTEMPTS = '2';
     process.env.ZEROSHOT_PR_VERIFY_FETCH_RETRY_INTERVAL_MS = '1';
+    // Default these merge-path tests to auto-merge ON; review-mode is covered separately.
+    previousAutoMerge = process.env.ZEROSHOT_AUTO_MERGE;
+    process.env.ZEROSHOT_AUTO_MERGE = '1';
 
     // Clear module cache for modules in the dependency chain
     const prVerificationPath = require.resolve('../src/agent/pr-verification.js');
@@ -111,6 +115,11 @@ describe('verify_pull_request hook action', () => {
       delete process.env.ZEROSHOT_PR_VERIFY_FETCH_RETRY_INTERVAL_MS;
     } else {
       process.env.ZEROSHOT_PR_VERIFY_FETCH_RETRY_INTERVAL_MS = previousFetchRetryIntervalMs;
+    }
+    if (previousAutoMerge === undefined) {
+      delete process.env.ZEROSHOT_AUTO_MERGE;
+    } else {
+      process.env.ZEROSHOT_AUTO_MERGE = previousAutoMerge;
     }
   });
 
@@ -566,6 +575,43 @@ describe('verify_pull_request hook action', () => {
     assert(agent.lastPublished, 'Expected message to be published');
     assert.strictEqual(agent.lastPublished.topic, 'CLUSTER_COMPLETE');
     assert.strictEqual(agent.lastPublished.content.data.pr_number, 456);
+  });
+
+  it('treats an open PR as success in review mode (auto-merge off)', async function () {
+    delete process.env.ZEROSHOT_AUTO_MERGE; // review mode: never merge, open PR is the goal
+    const agent = createMockAgent();
+    const hook = { action: 'verify_pull_request' };
+    const result = {
+      output: JSON.stringify({
+        pr_url: 'https://github.com/org/repo/pull/12',
+        pr_number: 12,
+        merged: false,
+      }),
+    };
+
+    let ghViewCalls = 0;
+    mockSpawnSyncFn = (command, args) => {
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        ghViewCalls++;
+        return spawnSuccess(
+          JSON.stringify({
+            number: 12,
+            state: 'OPEN',
+            mergedAt: null,
+            url: 'https://github.com/org/repo/pull/12',
+          })
+        );
+      }
+      return spawnFailure(`unexpected: ${commandText(command, args)}`);
+    };
+
+    await executeHook({ hook, agent, result });
+
+    assert.ok(agent.lastPublished, 'Expected completion to be published');
+    assert.strictEqual(agent.lastPublished.topic, 'CLUSTER_COMPLETE');
+    assert.strictEqual(agent.lastPublished.content.data.reason, 'git-pusher-complete-verified');
+    assert.strictEqual(agent.lastPublished.content.data.pr_number, 12);
+    assert.strictEqual(ghViewCalls, 1, 'should NOT poll for merge in review mode');
   });
 
   it('should pass correct workingDirectory to gh CLI', async function () {
