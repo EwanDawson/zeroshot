@@ -713,10 +713,11 @@ function openGithubPrForBranch(agent, adapter, branch, base, cwd) {
  */
 function createPullRequestDeterministically({ agent, adapter, platform }) {
   if (platform !== 'github') return null;
-  // Work where the worker's changes + the feature branch live: the isolation worktree.
-  // agent.workingDirectory resolves to the source checkout (typically on the base branch),
-  // which must NEVER receive commits/pushes.
-  const cwd = agent?.worktree?.path || agent?.workingDirectory || process.cwd();
+  // Operate in the isolation worktree (where the feature branch + worker changes live).
+  // agent.workingDirectory resolves to the source checkout (typically the base branch), which
+  // must NEVER receive commits/pushes.
+  const worktreePath = agent?.worktree?.path;
+  const cwd = worktreePath || agent?.workingDirectory || process.cwd();
 
   const head = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   const branch = getSafeBranchName(head.stdout);
@@ -725,8 +726,16 @@ function createPullRequestDeterministically({ agent, adapter, platform }) {
     return null;
   }
 
-  // Never commit/push onto the base branch — that is not a pull request and is destructive.
   const base = resolvePrBaseBranch(cwd);
+  // Safety: never risk committing to the source checkout / base branch. Outside the dedicated
+  // worktree we must positively confirm we are NOT on the base branch before proceeding; if the
+  // base cannot be determined, bail loudly rather than silently downgrade to a destructive push.
+  if (!worktreePath && !base) {
+    agent._log(
+      'Deterministic PR fallback: no worktree and base branch undetermined; skipping to avoid the source checkout.'
+    );
+    return null;
+  }
   if (base && branch === base) {
     agent._log(`Deterministic PR fallback: refusing to operate on base branch "${base}".`);
     return null;

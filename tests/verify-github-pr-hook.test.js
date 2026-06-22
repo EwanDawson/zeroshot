@@ -437,6 +437,41 @@ describe('verify_pull_request hook action', () => {
     );
   });
 
+  // Safety: with no worktree AND no determinable base branch, recovery must bail rather than
+  // risk committing/pushing the source checkout (which may be on the base branch).
+  it('bails out of recovery when there is no worktree and base is undeterminable', async function () {
+    delete process.env.ZEROSHOT_PR_BASE;
+    const agent = createMockAgent(); // no agent.worktree
+    const hook = { action: 'verify_pull_request' };
+    const result = { output: JSON.stringify({ summary: 'no PR' }) };
+
+    const calls = [];
+    mockSpawnSyncFn = (command, args) => {
+      calls.push(commandText(command, args));
+      if (command === 'git' && args[0] === 'rev-parse' && args.includes('origin/HEAD')) {
+        return spawnFailure(''); // base branch undeterminable
+      }
+      if (command === 'git' && args[0] === 'rev-parse') {
+        return spawnSuccess('main'); // source checkout is on the base branch
+      }
+      if (command === 'gh') {
+        assert.fail('gh must not run when recovery bails');
+      }
+      if (command === 'git' && (args[0] === 'push' || args[0] === 'commit')) {
+        assert.fail('git push/commit must not run when recovery bails');
+      }
+      return spawnSuccess('');
+    };
+
+    try {
+      await executeHook({ hook, agent, result });
+      assert.fail('Expected error to be thrown');
+    } catch (err) {
+      assert.match(err.message, /without creating a PR/);
+    }
+    assert.ok(!calls.some((c) => c.startsWith('git push')), 'must not push the source checkout');
+  });
+
   // REGRESSION: provider mismatch in hook parser
   // verify_pull_request previously parsed Codex output with Claude parser assumptions.
   // That dropped pr_number/pr_url even when the assistant output contained valid JSON.
