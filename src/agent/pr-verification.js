@@ -625,9 +625,11 @@ function resolvePrBaseBranch(cwd) {
 }
 
 function findExistingPrForBranch(branch, cwd) {
+  // Only OPEN PRs: a stale CLOSED/MERGED PR for this branch must not be adopted as
+  // "the" PR (that would publish a false CLUSTER_COMPLETE for dead work).
   const result = spawnSync(
     'gh',
-    ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'url,number', '--jq', '.[0]'],
+    ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url,number', '--jq', '.[0]'],
     { cwd, encoding: 'utf8' }
   );
   if (result.status === 0 && (result.stdout || '').trim()) {
@@ -650,22 +652,28 @@ function findExistingPrForBranch(branch, cwd) {
 function commitAndPushWorktree(agent, branch, cwd) {
   runGit(['add', '-A'], cwd);
   const hasStaged = runGit(['diff', '--cached', '--quiet'], cwd).status === 1;
+  const aheadCount = runGit(['rev-list', '--count', '@{upstream}..HEAD'], cwd).stdout;
+  console.error(
+    `[zeroshot:pr-recovery] commitAndPush branch=${branch} cwd=${cwd} hasStaged=${hasStaged} ahead=${aheadCount}`
+  );
   if (hasStaged) {
     const { title } = getIssueContext(agent);
     const subject = title ? `feat: ${title}` : 'feat: automated implementation';
     const commit = runGit(['commit', '-m', subject], cwd);
+    console.error(
+      `[zeroshot:pr-recovery] commit status=${commit.status} stderr=${commit.stderr.slice(0, 200)}`
+    );
     if (commit.status !== 0) {
-      agent._log(
-        `⚠️  Deterministic PR fallback: git commit failed: ${commit.stderr.slice(0, 200)}`
-      );
       // Do not push an unchanged branch — that would open a PR with none of the work.
       return false;
     }
   }
 
   const push = runGit(['push', '-u', 'origin', branch], cwd);
+  console.error(
+    `[zeroshot:pr-recovery] push status=${push.status} stderr=${push.stderr.slice(0, 200)}`
+  );
   if (push.status !== 0) {
-    agent._log(`⚠️  Deterministic PR fallback: git push failed: ${push.stderr.slice(0, 200)}`);
     return false;
   }
   return true;
@@ -691,13 +699,13 @@ function openGithubPrForBranch(agent, adapter, branch, cwd) {
 
   const create = spawnSync('gh', args, { cwd, encoding: 'utf8' });
   const combined = `${create.stdout || ''}\n${create.stderr || ''}`;
+  console.error(
+    `[zeroshot:pr-recovery] gh pr create base=${base || '(default)'} status=${create.status} out=${combined.trim().slice(0, 300)}`
+  );
   if (create.status !== 0) {
     // A racing create may already have opened the PR; prefer that over failing.
     const afterFailure = findExistingPrForBranch(branch, cwd);
     if (afterFailure) return afterFailure;
-    agent._log(
-      `⚠️  Deterministic PR fallback: gh pr create failed: ${combined.trim().slice(0, 300)}`
-    );
     return null;
   }
 
@@ -720,8 +728,10 @@ function createPullRequestDeterministically({ agent, adapter, platform }) {
 
   const head = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   const branch = getSafeBranchName(head.stdout);
+  console.error(
+    `[zeroshot:pr-recovery] createPR cwd=${cwd} headStatus=${head.status} headOut=${head.stdout.slice(0, 60)} branch=${branch}`
+  );
   if (head.status !== 0 || !branch || branch === 'HEAD') {
-    agent._log('⚠️  Deterministic PR fallback: could not resolve a named branch; skipping.');
     return null;
   }
 
