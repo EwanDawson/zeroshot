@@ -168,6 +168,8 @@ const PACKAGE_ROOT = path.resolve(__dirname, '..');
 function normalizeRunOptions(options) {
   if (options.ship) {
     options.pr = true;
+    // --ship is full automation: open the PR AND auto-merge it. (--pr alone is review-only.)
+    options.autoMerge = true;
     if (!options.docker) {
       options.worktree = true;
     }

@@ -153,6 +153,7 @@ function buildPrOptions(options, requiredQualityGates) {
     !options.prBase &&
     !options.mergeQueue &&
     !options.closeIssue &&
+    !options.autoMerge &&
     requiredQualityGates.length === 0
   ) {
     return null;
@@ -162,6 +163,7 @@ function buildPrOptions(options, requiredQualityGates) {
     prBase: options.prBase || null,
     mergeQueue: options.mergeQueue || false,
     closeIssue: options.closeIssue || null,
+    autoMerge: options.autoMerge || false,
     ...(requiredQualityGates.length > 0 ? { requiredQualityGates } : {}),
     cwd: options.cwd || process.cwd(),
   };
@@ -1728,6 +1730,7 @@ class Orchestrator {
       prBase: options.prBase,
       mergeQueue: options.mergeQueue,
       closeIssue: options.closeIssue,
+      autoMerge: options.autoMerge ?? options.autoPr,
       requiredQualityGates: options.requiredQualityGates,
       cwd: options.cwd,
     });

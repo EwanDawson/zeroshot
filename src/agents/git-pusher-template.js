@@ -341,7 +341,16 @@ function resolveGitHubConfig(options = {}) {
     (parseBool(repoGithub.closeIssue) === true ? 'always' : null) ||
     'never';
 
-  return { prBase, useMergeQueue, closeIssueMode };
+  // Auto-merge is OFF by default: the git-pusher opens the PR and leaves it open for human
+  // review. Enable full automation via --auto-pr, repo settings (github.autoMerge), or
+  // ZEROSHOT_AUTO_MERGE=1.
+  const autoMerge =
+    options.autoMerge === true ||
+    options.autoPr === true ||
+    parseBool(repoGithub.autoMerge) === true ||
+    process.env.ZEROSHOT_AUTO_MERGE === '1';
+
+  return { prBase, useMergeQueue, closeIssueMode, autoMerge };
 }
 
 /**
@@ -352,7 +361,7 @@ function resolveGitHubConfig(options = {}) {
  * @returns {Object|null} Platform configuration or null if unsupported
  */
 function getPlatformConfig(platform, config = {}) {
-  const { prBase, useMergeQueue, closeIssueMode } = config;
+  const { prBase, useMergeQueue, closeIssueMode, autoMerge } = config;
 
   const PLATFORM_CONFIGS = {
     github: {
@@ -405,7 +414,8 @@ for i in $(seq 1 90); do if timeout 30 gh pr view --json mergedAt --jq .mergedAt
     },
   };
 
-  return PLATFORM_CONFIGS[platform] || null;
+  const resolved = PLATFORM_CONFIGS[platform];
+  return resolved ? { ...resolved, autoMerge: autoMerge === true } : null;
 }
 
 /**
@@ -432,7 +442,11 @@ function generatePrompt(config) {
     rebaseBranch,
     usesMergeQueue,
     closeIssueMode,
+    autoMerge,
   } = config;
+
+  // Review-only mode (auto-merge OFF): create the PR and stop; never merge.
+  const reviewOnly = !autoMerge;
 
   // Azure-specific instructions for PR ID extraction
   const azurePrIdNote = requiresPrIdExtraction
@@ -459,8 +473,18 @@ If auto-complete is not available or you need to merge immediately:`
 If enqueue fails (merge queue not enabled, missing permissions, etc.), fall back to auto-merge:`
       : `This merges the ${prName} directly and deletes the remote branch. If it fails, try without branch deletion:`;
 
-  const finalOutputNote = requiresPrIdExtraction
-    ? `ONLY after the PR is created and auto-complete is set, output:
+  const finalOutputNote = reviewOnly
+    ? `ONLY after the ${prName} is CREATED (do NOT merge it — it is left open for review), output:
+\`\`\`json
+{"${outputFields.urlField}": "${prUrlExample}", "${outputFields.numberField}": 123, "merged": false}
+\`\`\`
+
+If truly no changes exist, output:
+\`\`\`json
+{"${outputFields.urlField}": null, "${outputFields.numberField}": null, "merged": false}
+\`\`\``
+    : requiresPrIdExtraction
+      ? `ONLY after the PR is created and auto-complete is set, output:
 \`\`\`json
 {"${outputFields.urlField}": "${prUrlExample}", "${outputFields.numberField}": 123, "merged": false, "auto_complete": true}
 \`\`\`
@@ -469,7 +493,7 @@ If truly no changes exist, output:
 \`\`\`json
 {"${outputFields.urlField}": null, "${outputFields.numberField}": null, "merged": false, "auto_complete": false}
 \`\`\``
-    : `ONLY after the ${prName} is MERGED, output:
+      : `ONLY after the ${prName} is MERGED, output:
 \`\`\`json
 {"${outputFields.urlField}": "${prUrlExample}", "${outputFields.numberField}": 123, "merged": true}
 \`\`\`
@@ -479,9 +503,38 @@ If truly no changes exist, output:
 {"${outputFields.urlField}": null, "${outputFields.numberField}": null, "merged": false}
 \`\`\``;
 
+  // STEP 6 differs by mode: review-only stops after creating the PR; full automation merges.
+  const step6Block = reviewOnly
+    ? `### STEP 6: DO NOT MERGE — leave the ${prName} open for human review
+Auto-merge is disabled for this run. After the ${prName} is created, you are DONE.
+Do NOT run \`gh pr merge\`, \`glab mr merge\`, auto-merge, or any merge/auto-complete command.
+Output the success JSON below with \`"merged": false\` and the ${prName} url/number.`
+    : `### STEP 6: ${mergeDescription}
+\`\`\`bash
+${mergeCmd}
+\`\`\`
+${mergeExplanation}
+\`\`\`bash
+${mergeFallbackCmd}
+\`\`\`
+
+If direct merge is blocked by pending CI or required review, set auto-merge/auto-complete when the platform supports it and output status-only JSON without \`blocked: true\`.
+If merge is blocked by failed CI, merge conflicts, rejected hooks, or any condition requiring code changes, do not debug or edit code. Output blocked JSON with the ${prName} details and failure summary.`;
+
+  // Mode-specific CRITICAL RULES lines.
+  const mergeRuleLine = reviewOnly
+    ? `- Do NOT merge the ${prName} - leave it OPEN for human review (auto-merge is disabled)`
+    : `- Do NOT skip ${mergeCmd.split(' ').slice(0, 4).join(' ')} - attempt merge or auto-merge before reporting blocked${requiresPrIdExtraction ? '\n- MUST extract PR ID from step 5 output to use in step 6' : ''}`;
+  const outputTimingLine = reviewOnly
+    ? `- Output JSON only after the ${prName} is CREATED (do not merge), or a non-code transport failure blocks progress`
+    : `- Output JSON only after the ${prName} is merged, auto-merge is enabled/pending, or a non-code transport failure blocks progress`;
+  const introMergeClause = reviewOnly
+    ? `create the ${prName} (do NOT merge — leave it open for review)`
+    : `create the ${prName}, then merge or enable auto-merge when possible`;
+
   return `CRITICAL: ALL VALIDATORS APPROVED. YOU ARE A TRANSPORT-ONLY GIT PUSHER.
 
-Your job is to preserve validator ownership: stage, commit, push, create the ${prName}, then merge or enable auto-merge when possible.
+Your job is to preserve validator ownership: stage, commit, push, ${introMergeClause}.
 
 Do NOT edit source files, tests, configs, generated artifacts, or lockfiles.
 Do NOT inspect CI logs to debug product code.
@@ -534,17 +587,7 @@ You MUST run the \`${createCmd.split(' ').slice(0, 3).join(' ')}\` command above
 
 ⚠️ AFTER ${prName} CREATION YOU ARE NOT DONE! CONTINUE TO STEP 6! ⚠️
 
-### STEP 6: ${mergeDescription}
-\`\`\`bash
-${mergeCmd}
-\`\`\`
-${mergeExplanation}
-\`\`\`bash
-${mergeFallbackCmd}
-\`\`\`
-
-If direct merge is blocked by pending CI or required review, set auto-merge/auto-complete when the platform supports it and output status-only JSON without \`blocked: true\`.
-If merge is blocked by failed CI, merge conflicts, rejected hooks, or any condition requiring code changes, do not debug or edit code. Output blocked JSON with the ${prName} details and failure summary.
+${step6Block}
 
 ${
   closeIssueMode !== 'never'
@@ -584,11 +627,11 @@ Only do this AFTER the ${prName} is merged.`
 - Do NOT skip git add -A
 - Do NOT skip git commit
 - Do NOT skip ${createCmd.split(' ').slice(0, 3).join(' ')} - THE TASK IS NOT DONE UNTIL ${prName} EXISTS
-- Do NOT skip ${mergeCmd.split(' ').slice(0, 4).join(' ')} - attempt merge or auto-merge before reporting blocked${requiresPrIdExtraction ? '\n- MUST extract PR ID from step 5 output to use in step 6' : ''}
+${mergeRuleLine}
 - Do NOT edit files after validator handoff
 - Do NOT debug product failures after validator handoff
 - If push, ${prName} creation, CI, or ${requiresPrIdExtraction ? 'auto-complete' : 'merge'} fails, report it instead of fixing code
-- Output JSON only after the ${prName} is merged, auto-merge is enabled/pending, or a non-code transport failure blocks progress
+${outputTimingLine}
 - A link from git push is NOT a ${prName} - you must run ${createCmd.split(' ').slice(0, 3).join(' ')}
 
 ## Final Output
@@ -647,8 +690,10 @@ function generateGitPusherAgent(platform, options = {}) {
     hooks: {
       onComplete: {
         action: 'verify_pull_request',
-        // No config needed - verification reads from result.structured_output
-        // and publishes CLUSTER_COMPLETE only if verification passes
+        // Carry the per-cluster auto-merge decision explicitly (no global mutable state). In
+        // review mode (false) an open PR is the verified end state; with auto-merge a merge
+        // is required before completion.
+        config: { autoMerge: resolvedConfig.autoMerge === true },
       },
     },
     output: {
