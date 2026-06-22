@@ -649,6 +649,42 @@ describe('verify_pull_request hook action', () => {
     assert.strictEqual(ghViewCalls, 1, 'should NOT poll for merge in review mode');
   });
 
+  it('hook config autoMerge=false overrides the env (per-cluster decision)', async function () {
+    // beforeEach sets ZEROSHOT_AUTO_MERGE=1; the per-cluster hook config must take precedence
+    // so concurrent clusters cannot read each other's mode via global state.
+    const agent = createMockAgent();
+    const hook = { action: 'verify_pull_request', config: { autoMerge: false } };
+    const result = {
+      output: JSON.stringify({
+        pr_url: 'https://github.com/org/repo/pull/5',
+        pr_number: 5,
+        merged: false,
+      }),
+    };
+
+    let ghViewCalls = 0;
+    mockSpawnSyncFn = (command, args) => {
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        ghViewCalls++;
+        return spawnSuccess(
+          JSON.stringify({
+            number: 5,
+            state: 'OPEN',
+            mergedAt: null,
+            url: 'https://github.com/org/repo/pull/5',
+          })
+        );
+      }
+      return spawnFailure(`unexpected: ${commandText(command, args)}`);
+    };
+
+    await executeHook({ hook, agent, result });
+
+    assert.strictEqual(agent.lastPublished.topic, 'CLUSTER_COMPLETE');
+    assert.strictEqual(agent.lastPublished.content.data.reason, 'git-pusher-complete-verified');
+    assert.strictEqual(ghViewCalls, 1, 'review mode via hook config: no merge poll');
+  });
+
   it('should pass correct workingDirectory to gh CLI', async function () {
     const agent = createMockAgent('/custom/work/dir');
     const hook = { action: 'verify_pull_request' };

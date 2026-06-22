@@ -785,9 +785,13 @@ async function recoverWithDeterministicPr({ agent, adapter, platform }) {
   return true;
 }
 
-async function verifyPullRequest({ result, agent }) {
+async function verifyPullRequest({ result, agent, hook }) {
   const platform = resolveVerificationPlatform(agent);
   const adapter = getVerificationAdapter(platform);
+  // Auto-merge is a per-cluster decision carried on the hook config (no global state), with a
+  // fallback to the user-set ZEROSHOT_AUTO_MERGE env. In review mode an open PR is the
+  // verified end state; with auto-merge on, a merge is required before completion.
+  const autoMerge = hook?.config?.autoMerge ?? process.env.ZEROSHOT_AUTO_MERGE === '1';
   const providerName =
     typeof agent?._resolveProvider === 'function' ? agent._resolveProvider() : 'claude';
   const claims = resolvePrClaimsFromOutput({ output: result.output, providerName, adapter });
@@ -845,7 +849,7 @@ async function verifyPullRequest({ result, agent }) {
   }
 
   // Auto-merge OFF (review mode): an existing open PR is the intended end state, not a failure.
-  if (process.env.ZEROSHOT_AUTO_MERGE !== '1' && !adapter.isMerged(prData)) {
+  if (!autoMerge && !adapter.isMerged(prData)) {
     agent._log(
       `✅ VERIFICATION PASSED: ${adapter.itemName} #${prData.number} created (review mode; left open)`
     );

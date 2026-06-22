@@ -663,10 +663,6 @@ If blocked before creating a ${prName}, output:
 function generateGitPusherAgent(platform, options = {}) {
   // Resolve config from CLI options and repo settings
   const resolvedConfig = resolveGitHubConfig(options);
-  // Bridge the resolved auto-merge decision to the verification hook (verifyPullRequest runs
-  // later in this same orchestrator process) so it knows whether an open, unmerged PR is the
-  // intended end state (review mode) rather than a verification failure.
-  process.env.ZEROSHOT_AUTO_MERGE = resolvedConfig.autoMerge ? '1' : '0';
   const platformConfig = getPlatformConfig(platform, resolvedConfig);
   const requiredQualityGates = resolveRequiredQualityGates(options);
 
@@ -694,8 +690,10 @@ function generateGitPusherAgent(platform, options = {}) {
     hooks: {
       onComplete: {
         action: 'verify_pull_request',
-        // No config needed - verification reads from result.structured_output
-        // and publishes CLUSTER_COMPLETE only if verification passes
+        // Carry the per-cluster auto-merge decision explicitly (no global mutable state). In
+        // review mode (false) an open PR is the verified end state; with auto-merge a merge
+        // is required before completion.
+        config: { autoMerge: resolvedConfig.autoMerge === true },
       },
     },
     output: {
